@@ -10,10 +10,12 @@ requires-python = ">=3.12"
 dependencies = [
     "textual>=1.0",
     "textual-serve>=1.0",
+    "rumps>=0.4",
 ]
 
 [project.scripts]
 rm-upload = "rm_upload.app:main"
+rm-upload-menu = "rm_upload.menubar:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rm_upload"]
