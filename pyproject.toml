@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rm-upload"
+version = "0.1.0"
+description = "TUI for uploading PDFs and EPUBs to reMarkable tablets"
+requires-python = ">=3.12"
+dependencies = [
+    "textual>=1.0",
+    "textual-serve>=1.0",
+]
+
+[project.scripts]
+rm-upload = "rm_upload.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rm_upload"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/rm_upload/templates" = "rm_upload/templates"

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>reMarkable uploader</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="{{ config.static.url }}css/xterm.css" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css?family=Roboto%20Mono"
+    />
+    <script src="{{ config.static.url }}js/textual.js"></script>
+    <style>
+      body {
+        background: #2a2520;
+      }
+
+      .dialog-container {
+        position: absolute;
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+        box-shadow: var(--shadow-elevation-high);
+      }
+      .shade {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        background: #2a2520;
+        background-image: url("{{ config.static.url }}images/background.png");
+      }
+      .intro {
+        width: 640px;
+        height: 240px;
+        font-size: 16px;
+        z-index: 20;
+        font-family: "Roboto Mono", menlo, monospace;
+        text-align: center;
+        opacity: 1;
+        color: #d4cdc0;
+        background-color: #352f29;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 32px;
+      }
+
+      body.-first-byte .intro-dialog,
+      body.-first-byte .intro-dialog .shade {
+        opacity: 0;
+        transition: opacity 0.3s ease-out;
+        display: none;
+      }
+
+      body .textual-terminal {
+        opacity: 0;
+        transition: opacity 0.3s ease-out;
+      }
+
+      body.-first-byte .textual-terminal {
+        opacity: 1;
+        transition: opacity 0.3s ease-out;
+      }
+
+      .intro svg {
+        padding-right: 16px;
+      }
+
+      body Button {
+        padding: 16px 32px;
+        background-color: #7a9a6a;
+        color: #2a2520;
+        border: none;
+        font-family: "Roboto Mono", menlo, monospace;
+        margin: 16px;
+        display: block;
+      }
+
+      Button:hover {
+        background: #8aaa7a;
+        cursor: pointer;
+      }
+
+      .closed-dialog {
+        opacity: 0;
+        display: none;
+      }
+
+      body.-closed .closed-dialog {
+        opacity: 1;
+        display: flex;
+      }
+
+      #start {
+        display: none;
+      }
+
+      #start.-delay {
+        display: flex;
+      }
+
+    </style>
+    <script>
+      function getStartUrl() {
+        const url = new URL(window.location.href);
+        const params = new URLSearchParams(url.search);
+        params.delete("delay");
+        return url.pathname + "?" + params.toString();
+      }
+      async function refresh() {
+        const ping_url = document.body.dataset.pingurl;
+        if (ping_url) {
+          await fetch(ping_url, {
+            method: "GET",
+            mode: "no-cors",
+          });
+        }
+        window.location.href = getStartUrl();
+      }
+    </script>
+  </head>
+  <body data-pingurl="{{ ping_url }}">
+    <div class="dialog-container intro-dialog">
+      <div class="shade"></div>
+      <div class="intro">
+        <div>{{ application.name or 'rm-upload' }}</div>
+        <button type="button" onClick="refresh()" id="start">Start</button>
+      </div>
+    </div>
+
+    <div class="dialog-container closed-dialog">
+      <div class="shade"></div>
+      <div class="intro">
+        <div class="message">Session ended.</div>
+        <button type="button" onClick="refresh()">Restart</button>
+      </div>
+    </div>
+
+    <div
+      id="terminal"
+      class="textual-terminal"
+      data-session-websocket-url="{{ app_websocket_url }}"
+      data-font-size="{{ font_size }}"
+    ></div>
+
+    <script>
+      (function () {
+        var VALID_EXTENSIONS = [".pdf", ".epub"];
+
+        function getExtension(filename) {
+          var idx = filename.lastIndexOf(".");
+          return idx >= 0 ? filename.slice(idx).toLowerCase() : "";
+        }
+
+        document.addEventListener("dragover", function (e) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        });
+
+        document.addEventListener("drop", function (e) {
+          e.preventDefault();
+
+          var files = e.dataTransfer.files;
+          if (!files || files.length === 0) return;
+
+          var file = files[0];
+          var ext = getExtension(file.name);
+          if (!VALID_EXTENSIONS.includes(ext)) return;
+
+          var formData = new FormData();
+          formData.append("file", file);
+          fetch("/upload", { method: "POST", body: formData });
+        });
+      })();
+    </script>
+  </body>
+</html>
