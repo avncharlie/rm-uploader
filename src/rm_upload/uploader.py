@@ -40,10 +40,12 @@ class RemarkableUploader:
         ip: str = "192.168.7.237",
         ssh_key: Path | None = None,
         parent_uuid: str = "",
+        rsync_path: str = "rsync",
     ):
         self.ip = ip
         self.ssh_key = ssh_key or Path.home() / ".ssh" / "id_rsa_remarkable"
         self.parent_uuid = parent_uuid
+        self.rsync_path = rsync_path
         self.remote = f"root@{ip}"
         self.remote_dir = "/home/root/.local/share/remarkable/xochitl"
         self.ssh_opts = [
@@ -108,7 +110,7 @@ class RemarkableUploader:
     ) -> None:
         remote_path = f"{self.remote}:{self.remote_dir}/{job.uuid}.{job.ext}"
         cmd = [
-            "rsync", "-a", "--info=progress2",
+            self.rsync_path, "-a", "--info=progress2",
             "-e", self._ssh_e_string(),
             str(job.filepath), remote_path,
         ]

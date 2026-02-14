@@ -8,6 +8,7 @@ import shlex
 import tempfile
 from pathlib import Path
 
+from rich.markup import escape
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.screen import ModalScreen
@@ -29,20 +30,33 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_IP = "192.168.7.237"
 
 
-def _load_saved_ip() -> str:
+def _load_config() -> dict:
     try:
-        data = json.loads(CONFIG_FILE.read_text())
-        return data.get("ip", DEFAULT_IP)
+        return json.loads(CONFIG_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return DEFAULT_IP
+        return {}
+
+
+def _save_config(data: dict) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        existing = _load_config()
+        existing.update(data)
+        CONFIG_FILE.write_text(json.dumps(existing) + "\n")
+    except OSError:
+        pass
+
+
+def _load_saved_ip() -> str:
+    return _load_config().get("ip", DEFAULT_IP)
+
+
+def _load_saved_rsync() -> str:
+    return _load_config().get("rsync", "rsync")
 
 
 def _save_ip(ip: str) -> None:
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps({"ip": ip})  + "\n")
-    except OSError:
-        pass
+    _save_config({"ip": ip})
 
 STEP_CONNECT = 0
 STEP_UPLOAD = 1
@@ -95,7 +109,7 @@ class IpScreen(ModalScreen[str]):
         self._current_ip = current_ip
 
     def compose(self) -> ComposeResult:
-        yield Input(value="10.11.99.1", placeholder="Tablet IP", id="ip-input")
+        yield Input(value=self._current_ip, placeholder="Tablet IP", id="ip-input")
 
     def on_mount(self) -> None:
         self.query_one("#ip-input", Input).focus()
@@ -191,16 +205,18 @@ class RmUploadApp(App):
         ("q", "quit", "Quit"),
         ("ctrl+c", "quit", "Quit"),
         ("t", "test_connection", "Test"),
-        ("i", "set_ip", "Set IP"),
+        ("i", "set_ip", "Change tablet IP"),
+        ("u", "set_usb_ip", "Set to USB IP"),
         ("ctrl+q", "cancel_upload", "Cancel upload"),
     ]
 
     ENABLE_COMMAND_PALETTE = False
     TITLE = "reMarkable uploader"
 
-    def __init__(self, ip: str = "192.168.7.237") -> None:
+    def __init__(self, ip: str = "192.168.7.237", rsync_path: str = "rsync") -> None:
         super().__init__()
         self.ip = ip
+        self.rsync_path = rsync_path
         self._uploading = False
         self._upload_worker: Worker | None = None
 
@@ -215,6 +231,10 @@ class RmUploadApp(App):
     def on_mount(self) -> None:
         self.action_test_connection()
 
+    def action_set_usb_ip(self) -> None:
+        self.ip = "10.11.99.1"
+        self.action_test_connection()
+
     def action_set_ip(self) -> None:
         def _on_dismiss(new_ip: str | None) -> None:
             if new_ip:
@@ -222,7 +242,7 @@ class RmUploadApp(App):
                 _save_ip(new_ip)
                 self.action_test_connection()
 
-        self.push_screen(IpScreen(self.ip), callback=_on_dismiss)
+        self.push_screen(IpScreen(_load_saved_ip()), callback=_on_dismiss)
 
     def _set_message(self, msg: str) -> None:
         self.query_one("#message", Static).update(f"  {msg}")
@@ -267,7 +287,7 @@ class RmUploadApp(App):
     @work(exclusive=True)
     async def action_test_connection(self) -> None:
         self._set_message(f"[#7a7268]Connecting to {self.ip}...[/]")
-        uploader = RemarkableUploader(ip=self.ip)
+        uploader = RemarkableUploader(ip=self.ip, rsync_path=self.rsync_path)
         if await uploader.test_connection():
             self._set_message("[#7a9a6a]Connected[/]")
         else:
@@ -291,7 +311,7 @@ class RmUploadApp(App):
         self._uploading = True
         progress_bar = self.query_one("#progress-bar", ProgressBar)
         progress_bar.progress = 0
-        uploader = RemarkableUploader(ip=self.ip)
+        uploader = RemarkableUploader(ip=self.ip, rsync_path=self.rsync_path)
         job = UploadJob(filepath=filepath)
 
         try:
@@ -328,7 +348,7 @@ class RmUploadApp(App):
             self._set_steps(STEP_CONNECT, error="Cancelled")
             self._set_message("Upload cancelled.")
         except Exception as e:
-            self._set_message(f"[#cc6666]Error: {e}[/]")
+            self._set_message(f"[#cc6666]Error: {escape(str(e))}[/]")
         finally:
             self._uploading = False
             self._upload_worker = None
@@ -340,15 +360,20 @@ class RmUploadApp(App):
 
 def main() -> None:
     saved_ip = _load_saved_ip()
+    saved_rsync = _load_saved_rsync()
     parser = argparse.ArgumentParser(description="Upload PDFs/EPUBs to reMarkable")
     parser.add_argument("ip", nargs="?", default=saved_ip, help="Tablet IP address")
     parser.add_argument("--ip", dest="ip_flag", default=None, help="Tablet IP address")
     parser.add_argument("--web", action="store_true", help="Serve via browser")
     parser.add_argument("--port", type=int, default=8765, help="Port for web server")
+    parser.add_argument("--rsync", default=saved_rsync, help="Path to rsync binary")
     args = parser.parse_args()
     ip = args.ip_flag or args.ip
 
-    app = RmUploadApp(ip=ip)
+    if args.rsync != "rsync":
+        _save_config({"rsync": args.rsync})
+
+    app = RmUploadApp(ip=ip, rsync_path=args.rsync)
 
     if args.web:
         from rm_upload.web_server import RmUploadServer
