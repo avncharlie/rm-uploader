@@ -28,6 +28,7 @@ VALID_EXTENSIONS = {".pdf", ".epub"}
 CONFIG_DIR = Path.home() / ".config" / "rm-upload"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_IP = "192.168.7.237"
+DEFAULT_SSH_KEY = "~/.ssh/id_rsa_remarkable"
 
 
 def _load_config() -> dict:
@@ -55,30 +56,57 @@ def _load_saved_rsync() -> str:
     return _load_config().get("rsync", "rsync")
 
 
+def _load_saved_ssh_key() -> str | None:
+    return _load_config().get("ssh_key")
+
+
+def _load_saved_mirror_host() -> str | None:
+    return _load_config().get("mirror_host")
+
+
+def _load_saved_mirror_path() -> str | None:
+    return _load_config().get("mirror_path")
+
+
+def _load_saved_mirror_key() -> str | None:
+    return _load_config().get("mirror_key")
+
+
 def _save_ip(ip: str) -> None:
     _save_config({"ip": ip})
-
-STEP_CONNECT = 0
-STEP_UPLOAD = 1
-STEP_METADATA = 2
-STEP_RESTART = 3
-STEP_DONE = 4
-
-STEPS = [
-    "Connecting...",
-    "Uploading file...",
-    "Writing metadata...",
-    "Restarting xochitl...",
-    "Done!",
-]
 
 # Dark reMarkable colour scheme (inverted from rm_viewer CSS)
 # Warm dark browns/greys inspired by the reMarkable palette
 
 
-def _render_steps(current: int, error: str | None = None, detail: str = "") -> str:
+def _build_steps(mirror: bool) -> tuple[list[str], dict[str, int]]:
+    """Build step labels and name→index mapping, optionally including a mirror step."""
+    labels = ["Connecting..."]
+    if mirror:
+        labels.append("Syncing to mirror...")
+    labels += ["Uploading file...", "Writing metadata...", "Restarting xochitl...", "Done!"]
+    idx: dict[str, int] = {}
+    for i, label in enumerate(labels):
+        if label.startswith("Connecting"):
+            idx["connect"] = i
+        elif label.startswith("Syncing"):
+            idx["mirror"] = i
+        elif label.startswith("Uploading"):
+            idx["upload"] = i
+        elif label.startswith("Writing"):
+            idx["metadata"] = i
+        elif label.startswith("Restarting"):
+            idx["restart"] = i
+        elif label.startswith("Done"):
+            idx["done"] = i
+    return labels, idx
+
+
+def _render_steps(
+    steps: list[str], current: int, error: str | None = None, detail: str = ""
+) -> str:
     lines = []
-    for i, label in enumerate(STEPS):
+    for i, label in enumerate(steps):
         if error and i == current:
             lines.append(f"  [#cc6666]x[/]  {label}  [#cc6666]{error}[/]")
         elif i < current:
@@ -213,12 +241,35 @@ class RmUploadApp(App):
     ENABLE_COMMAND_PALETTE = False
     TITLE = "reMarkable uploader"
 
-    def __init__(self, ip: str = "192.168.7.237", rsync_path: str = "rsync") -> None:
+    def __init__(
+        self,
+        ip: str = "192.168.7.237",
+        rsync_path: str = "rsync",
+        ssh_key: str | None = None,
+        mirror_host: str | None = None,
+        mirror_path: str | None = None,
+        mirror_key: str | None = None,
+    ) -> None:
         super().__init__()
         self.ip = ip
         self.rsync_path = rsync_path
+        self.ssh_key = ssh_key
+        self.mirror_host = mirror_host
+        self.mirror_path = mirror_path
+        self.mirror_key = mirror_key
         self._uploading = False
         self._upload_worker: Worker | None = None
+        self._step_labels, self._steps = _build_steps(mirror=bool(mirror_path))
+
+    def _make_uploader(self) -> RemarkableUploader:
+        return RemarkableUploader(
+            ip=self.ip,
+            rsync_path=self.rsync_path,
+            ssh_key=Path(self.ssh_key).expanduser() if self.ssh_key else None,
+            mirror_host=self.mirror_host,
+            mirror_path=self.mirror_path,
+            mirror_key=Path(self.mirror_key).expanduser() if self.mirror_key else None,
+        )
 
     def compose(self) -> ComposeResult:
         yield Header(icon="")
@@ -249,7 +300,7 @@ class RmUploadApp(App):
 
     def _set_steps(self, current: int, error: str | None = None, detail: str = "") -> None:
         self.query_one("#steps", Static).update(
-            _render_steps(current, error=error, detail=detail)
+            _render_steps(self._step_labels, current, error=error, detail=detail)
         )
 
     def _parse_pasted_paths(self, text: str) -> list[Path]:
@@ -287,7 +338,7 @@ class RmUploadApp(App):
     @work(exclusive=True)
     async def action_test_connection(self) -> None:
         self._set_message(f"[#7a7268]Connecting to {self.ip}...[/]")
-        uploader = RemarkableUploader(ip=self.ip, rsync_path=self.rsync_path)
+        uploader = self._make_uploader()
         if await uploader.test_connection():
             self._set_message("[#7a9a6a]Connected[/]")
         else:
@@ -297,7 +348,7 @@ class RmUploadApp(App):
         if self._upload_worker and self._upload_worker.is_running:
             self._upload_worker.cancel()
             self._uploading = False
-            self._set_steps(STEP_CONNECT, error="Cancelled")
+            self._set_steps(self._steps["connect"], error="Cancelled")
             self._set_message("Upload cancelled.")
 
     def _start_upload(self, filepath: Path) -> None:
@@ -311,44 +362,66 @@ class RmUploadApp(App):
         self._uploading = True
         progress_bar = self.query_one("#progress-bar", ProgressBar)
         progress_bar.progress = 0
-        uploader = RemarkableUploader(ip=self.ip, rsync_path=self.rsync_path)
+        uploader = self._make_uploader()
         job = UploadJob(filepath=filepath)
+        s = self._steps
+        mirror_done = False
 
         try:
             # Step: Connect
-            self._set_steps(STEP_CONNECT)
+            self._set_steps(s["connect"])
             self._set_message(f"Uploading {filepath.name} ({job.size_mb})")
             if not await uploader.test_connection():
-                self._set_steps(STEP_CONNECT, error="Connection failed")
+                self._set_steps(s["connect"], error="Connection failed")
                 self._set_message(f"Check IP ({self.ip}) and SSH key.")
                 return
 
-            # Step: Upload
-            self._set_steps(STEP_UPLOAD)
+            # Step: Mirror (if enabled)
+            if uploader.mirror_enabled:
+                self._set_steps(s["mirror"])
+                mirror_log = lambda msg: self._set_message(f"[#7a7268]{msg}[/]")
+
+                def on_mirror_progress(j: UploadJob) -> None:
+                    pct = int(j.progress * 100)
+                    progress_bar.progress = pct
+                    self._set_steps(s["mirror"], detail=f"{pct}%")
+
+                await uploader.mirror_upload(
+                    job, on_log=mirror_log, on_progress=on_mirror_progress
+                )
+                mirror_done = True
+                progress_bar.progress = 0
+
+            # Step: Upload to device
+            self._set_steps(s["upload"])
 
             def on_progress(j: UploadJob) -> None:
                 pct = int(j.progress * 100)
                 progress_bar.progress = pct
-                self._set_steps(STEP_UPLOAD, detail=f"{pct}%")
+                self._set_steps(s["upload"], detail=f"{pct}%")
 
             await uploader.upload_file(job, on_progress=on_progress)
             progress_bar.progress = 100
 
-            # Step: Metadata (already written by upload_file, just show it)
-            self._set_steps(STEP_RESTART)
-
             # Step: Restart
+            self._set_steps(s["restart"])
             await uploader.restart_xochitl()
 
             # Done
-            self._set_steps(STEP_DONE)
+            self._set_steps(s["done"])
             self._set_message(f"[#7a9a6a]{filepath.name} uploaded![/]")
 
         except asyncio.CancelledError:
-            self._set_steps(STEP_CONNECT, error="Cancelled")
+            self._set_steps(s["connect"], error="Cancelled")
             self._set_message("Upload cancelled.")
+            if mirror_done:
+                await uploader.mirror_cleanup(job, on_log=lambda _: None)
+            await uploader.device_cleanup(job)
         except Exception as e:
             self._set_message(f"[#cc6666]Error: {escape(str(e))}[/]")
+            if mirror_done:
+                await uploader.mirror_cleanup(job, on_log=lambda _: None)
+            await uploader.device_cleanup(job)
         finally:
             self._uploading = False
             self._upload_worker = None
@@ -361,19 +434,49 @@ class RmUploadApp(App):
 def main() -> None:
     saved_ip = _load_saved_ip()
     saved_rsync = _load_saved_rsync()
+    saved_ssh_key = _load_saved_ssh_key()
+    saved_mirror_host = _load_saved_mirror_host()
+    saved_mirror_path = _load_saved_mirror_path()
+    saved_mirror_key = _load_saved_mirror_key()
+
     parser = argparse.ArgumentParser(description="Upload PDFs/EPUBs to reMarkable")
     parser.add_argument("ip", nargs="?", default=saved_ip, help="Tablet IP address")
     parser.add_argument("--ip", dest="ip_flag", default=None, help="Tablet IP address")
     parser.add_argument("--web", action="store_true", help="Serve via browser")
     parser.add_argument("--port", type=int, default=8765, help="Port for web server")
     parser.add_argument("--rsync", default=saved_rsync, help="Path to rsync binary")
+    parser.add_argument(
+        "--ssh-key",
+        default=saved_ssh_key or DEFAULT_SSH_KEY,
+        help="SSH key for the reMarkable device",
+    )
+    parser.add_argument("--mirror-host", default=saved_mirror_host, help="Mirror remote host (e.g. user@server)")
+    parser.add_argument("--mirror-path", default=saved_mirror_path, help="Remote xochitl directory on mirror host")
+    parser.add_argument("--mirror-key", default=saved_mirror_key, help="SSH key for the mirror host")
     args = parser.parse_args()
     ip = args.ip_flag or args.ip
 
     if args.rsync != "rsync":
         _save_config({"rsync": args.rsync})
 
-    app = RmUploadApp(ip=ip, rsync_path=args.rsync)
+    if args.ssh_key != DEFAULT_SSH_KEY:
+        _save_config({"ssh_key": args.ssh_key})
+
+    if args.mirror_host:
+        _save_config({"mirror_host": args.mirror_host})
+    if args.mirror_path:
+        _save_config({"mirror_path": args.mirror_path})
+    if args.mirror_key:
+        _save_config({"mirror_key": args.mirror_key})
+
+    app = RmUploadApp(
+        ip=ip,
+        rsync_path=args.rsync,
+        ssh_key=args.ssh_key,
+        mirror_host=args.mirror_host,
+        mirror_path=args.mirror_path,
+        mirror_key=args.mirror_key,
+    )
 
     if args.web:
         from rm_upload.web_server import RmUploadServer

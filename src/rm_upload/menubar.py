@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import sys
 import threading
 import webbrowser
@@ -13,7 +14,14 @@ import objc
 from aiohttp.web_runner import GracefulExit
 from PyObjCTools import AppHelper
 
-from rm_upload.app import _load_saved_ip, _load_saved_rsync
+from rm_upload.app import (
+    _load_saved_ip,
+    _load_saved_mirror_host,
+    _load_saved_mirror_key,
+    _load_saved_mirror_path,
+    _load_saved_rsync,
+    _load_saved_ssh_key,
+)
 from rm_upload.web_server import RmUploadServer
 
 
@@ -141,8 +149,23 @@ class MenubarDelegate(AppKit.NSObject):
     def _start_server(self):
         ip = _load_saved_ip()
         rsync = _load_saved_rsync()
+        ssh_key = _load_saved_ssh_key()
+        mirror_host = _load_saved_mirror_host()
+        mirror_path = _load_saved_mirror_path()
+        mirror_key = _load_saved_mirror_key()
+
+        cmd = f"{sys.executable} -m rm_upload.app {shlex.quote(ip)} --rsync {shlex.quote(rsync)}"
+        if ssh_key:
+            cmd += f" --ssh-key {shlex.quote(ssh_key)}"
+        if mirror_host:
+            cmd += f" --mirror-host {shlex.quote(mirror_host)}"
+        if mirror_path:
+            cmd += f" --mirror-path {shlex.quote(mirror_path)}"
+        if mirror_key:
+            cmd += f" --mirror-key {shlex.quote(mirror_key)}"
+
         self.server = MenubarServer(
-            command=f"{sys.executable} -m rm_upload.app {ip} --rsync {rsync}",
+            command=cmd,
             port=SERVER_PORT,
         )
 
@@ -182,14 +205,26 @@ class MenubarDelegate(AppKit.NSObject):
 def main():
     import argparse
 
+    from rm_upload.app import _save_config
+
     parser = argparse.ArgumentParser(description="reMarkable uploader menubar")
     parser.add_argument("--rsync", default=None, help="Path to rsync binary")
+    parser.add_argument("--ssh-key", default=None, help="SSH key for the reMarkable device")
+    parser.add_argument("--mirror-host", default=None, help="Mirror remote host (e.g. user@server)")
+    parser.add_argument("--mirror-path", default=None, help="Remote xochitl directory on mirror host")
+    parser.add_argument("--mirror-key", default=None, help="SSH key for the mirror host")
     args = parser.parse_args()
 
     if args.rsync:
-        from rm_upload.app import _save_config
-
         _save_config({"rsync": args.rsync})
+    if args.ssh_key:
+        _save_config({"ssh_key": args.ssh_key})
+    if args.mirror_host:
+        _save_config({"mirror_host": args.mirror_host})
+    if args.mirror_path:
+        _save_config({"mirror_path": args.mirror_path})
+    if args.mirror_key:
+        _save_config({"mirror_key": args.mirror_key})
 
     app = AppKit.NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
