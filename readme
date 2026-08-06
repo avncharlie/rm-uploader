@@ -1,4 +1,0 @@
-python3 -m pip install .
-
-rm-upload
-rm-upload --web
